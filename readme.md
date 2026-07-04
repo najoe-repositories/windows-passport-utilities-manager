@@ -170,9 +170,9 @@ MIT — see project license. voidtools Everything has its own license. WPUM Term
 
 | | |
 |---|---|
-| **Developer** | Najoe (mjolnir) |
+| **Developer** | Najoe |
 | **Email** | [me@najoe.info](mailto:me@najoe.info) |
-| **Product** | Windows Passport Utilities Manager v0.1.0 |
+| **Product** | Windows Passport Utilities Manager v0.2.0 |
 | **Publisher ID** | `com.najoesolutions.windows-passport-utilities` |
 
 **When reporting issues, please include:**
