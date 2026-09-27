@@ -239,7 +239,7 @@ Roadmap items are planned, not guaranteed. Priorities may change based on user f
 ## Support
 
 <a href="https://buymeacoffee.com/jojaafar">
-  <img style="width: 50%; height: 50%;" src="./Najoe/assets/img/bmc-button.png"> 
+  <img style="width: 50%; height: 50%;" src="https://github.com/harimau99/teratak-repo/blob/main/Najoe/assets/img/bmc-button.png"> 
 </a>
 
 ---
