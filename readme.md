@@ -236,6 +236,12 @@ Roadmap items are planned, not guaranteed. Priorities may change based on user f
 | Search | `everything-rs` + Everything64 SDK |
 | Installer | NSIS (optional) |
 
+## Support
+
+<a href="https://buymeacoffee.com/jojaafar">
+  <img style="width: 50%; height: 50%;" src="./Najoe/assets/img/bmc-button.png"> 
+</a>
+
 ---
 
 ## License
