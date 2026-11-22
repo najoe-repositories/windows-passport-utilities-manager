@@ -1,0 +1,106 @@
+# ADR 0001: Security model
+
+- Status: Proposed
+- Date: 2026-11-23
+- Deciders: Solution Architect (draft), project owner (to accept)
+- Scope: WPUM 0.3.1 (Tauri 2, SvelteKit, Rust)
+
+## Context
+
+WPUM is a Windows tray app with two tools: a DCA Efficiency Mode disabler and an Everything-based file search. It can open files, move files to the Recycle Bin, run installers, and change process settings. The UI is a web view, so any script injected into it must not reach these powers.
+
+Assets to protect: user files, the system (installers, processes), and the setup/consent state.
+
+Assumed threats:
+1. Script injection in the web view.
+2. A malicious or malformed path or query.
+3. A tampered download or installer.
+4. Accidental edits of the settings file.
+5. A planted DLL beside the EXE.
+
+Out of scope: malware already running as the same user. It can do anything the user can, so no in-app control stops it.
+
+## Decision
+
+Keep the Rust side as the only trusted side. The web view asks, and Rust checks.
+
+1. **Least privilege.** Run as the standard user (`asInvoker`). Check for admin only when installing, or for full DCA coverage. Without admin, DCA runs in limited mode.
+2. **Small web-view surface.**
+   - Strict CSP: `default-src 'self'`, `script-src 'self'`, IPC connections only.
+   - The capability file denies every `store:*` permission and the dev-tools toggle for the main window. The web view cannot read or write settings directly.
+3. **Validation in Rust, at the boundary.** Every command clamps its input: poll interval 500 ms to 60 s, query length, result count, offset, and an allow list of sort keys.
+4. **Consent gates.** `ensure_terms_accepted` and `ensure_setup_complete` guard commands. Setup state and settings carry an HMAC-SHA256 tag. A failed check falls back to defaults.
+5. **Path safety.**
+   - Open and reveal accept only paths from the current search results.
+   - Reject UNC and device paths, `..` segments, odd trailing characters, and a list of executable and script extensions.
+   - Delete accepts only paths from the last duplicate scan, inside the scan scope, under the user profile, and outside AppData and similar folders.
+   - Delete rejects symlinks and reparse points, uses the Recycle Bin, and refuses drive roots and system folders.
+6. **Supply chain.**
+   - Everything's installer is pinned to a version and a SHA-256, and installs silently only when elevated.
+   - `Everything64.dll` is bundled inside the EXE and written beside it. The app hardens the DLL search path at startup.
+   - The WebView2 bootstrapper is downloaded from a Microsoft link.
+7. **DCA safety.** Hard-protected processes (for example `lsass.exe`, `csrss.exe`) cannot be removed from the protected list. User-added names are normalized and capped at 100.
+
+## Alternatives considered
+
+| Option | Why not chosen |
+|---|---|
+| Run always as admin | Larger blast radius. Most features do not need it. |
+| Let the web view use the store plugin | Any script injection could change consent or settings. |
+| Delete permanently | Not recoverable. The Recycle Bin gives an undo. |
+| Open any path the user types | Turns the app into a launcher for scripts and executables. |
+
+## Consequences
+
+Good:
+- A compromised web view cannot delete, open, or install on its own. It can only ask.
+- Deletes can be undone.
+- The installer download cannot change silently. The file that runs is a locked copy in a protected folder that was hashed after it was copied.
+
+Costs and limits:
+- Admin is needed for full DCA coverage and installs.
+- The tamper tag is not a secret. Its key comes from a public salt, the MachineGuid, and the data folder. It catches accidents and casual edits only. Same-user malware can forge it. Do not describe it as strong protection. Call it "tamper-evident", not "HMAC-signed" or "secure". Protecting the secret with DPAPI stays an option.
+- A failed check resets settings to defaults. The last 3 old values are kept as `settings_backups` (and `setup_backups` for the consent state) and the user sees a notice once.
+
+## Known gaps (status on branch `security/adr-0001-gaps`, round 5 final, 2026-11-23T04:55:05+08:00)
+
+"Closed" means a named test or a recorded run proves it. "Accepted" means the risk stays on purpose, with a reason and an owner. "Open" means not fixed. Test counts: `cargo test` in `src-tauri`, 71 passed, 0 failed (run by the author, non-elevated). Independent QA and Cybersecurity reports exist for rounds 1 to 5 in the workspace `reports` folder: `qa-0.3.1.md`, `security-0.3.1.md`, `qa-round2.md`, `security-round2.md`, `qa-round3.md`, `security-round3.md`, `qa-round4.md`, `security-round4.md`, `qa-round5.md`, `security-round5.md`. The final verdict of both (round 5, commit `d4dbca2`) was ready to merge for the 0.3.1 scope. The elevated install and the elevated owner check have still not been run by anyone.
+
+| # | Gap | Status | Evidence |
+|---|---|---|---|
+| 1 | Tag key derivable by any local process | Accepted | The key is public by design. README says "tamper-evident". Not fixed: DPAPI. Owner: Security. |
+| 2 | Bad settings tag resets silently | Closed (pure logic), store glue and UI banner not run | `settings::tests`: `backups_keep_newest_three_and_skip_duplicates`, `two_different_oversized_values_both_get_a_notice`, `existing_oversized_entries_are_capped_too`, `notice_is_only_pending_for_true`. |
+| 2b | Consent state resets silently | Closed (same limits) | `gate.rs` now calls `backup_rejected_setup` (last 3 kept as `setup_backups`, one-time notice). Test: `rejected_setup_state_is_kept_as_a_value`. The gate call itself needs an `AppHandle` and was not run. |
+| 2c | No restore path for backups | Open | Data is kept in `settings.json`, nothing reads it back. Owner: Backend. |
+| 3 | Delete block list hardcoded to `C:\` | Closed (unit level) | Union of fixed `C:` defaults and normalized env values. Tests in `paths.rs`: `env_cannot_remove_c_defaults`, `env_values_are_normalized`, `x86_process_on_x64_still_blocks_program_files`, `program_files_8_3_alias_resolves_to_long_name`. Not run on a Windows install on another drive or in a 32-bit process. |
+| 3b | System folders come from env, not the OS | Closed (unit level) | The delete list now also takes the OS known folders (Windows, System32, Program Files x86/x64, ProgramData via `SHGetKnownFolderPath`), on top of the fixed `C:` defaults and the env union. Tests: `os_known_folders_are_in_the_delete_list_even_if_env_lies`, `real_os_known_folders_reach_the_default_list`. Not run on a Windows install on another drive. |
+| 4 | Open block list too short | Accepted (still a block list) | 65 extensions added across rounds. Tests: `new_extensions_are_blocked`, `more_launcher_extensions_are_blocked`, `round3_launcher_extensions_are_blocked`, `round4_launcher_extensions_are_blocked`. Extensionless files and rarer types still open (for example `appinstaller appxbundle msixbundle theme themepack website wsb iso img vhd vhdx sh rb pl bas`). Owner: Security. Next: allow list of document types. |
+| 5 | WebView2 bootstrapper not verified | Closed, residuals accepted | `WinVerifyTrust`, subject CN, issuer organisation and version-resource identity are checked on the file that runs. The 1-4 MB size band was dropped. Tests: `unsigned_file_is_rejected`, `other_microsoft_signed_exe_is_not_the_bootstrapper`, `real_bootstrapper_passes_when_provided` (run with the real file). Accepted: signer root not pinned, revocation off, an old genuine Microsoft bootstrapper would pass (no minimum version). |
+| 6 | DLL beside EXE | Open (design only, needs the owner's decision) | See the proposal below. No code. Owner: Architect. |
+| 7a | Check-then-run on the elevated Everything installer and on the WebView2 bootstrapper | Closed (unit level), not run in an elevated install | **Proven (non-elevated, by tests):** the verified bytes are copied into a new folder with a protected DACL and run from the locked copy's final path (round 3). The elevated base is the OS `FOLDERID_ProgramData` pinned to the **kernel** system drive: it must equal `<GetSystemWindowsDirectoryW drive>\ProgramData`, be on a fixed local volume, and not be a link. Neither the `ProgramData` nor the `SystemDrive` environment value can move it. Tests: `spoofed_systemdrive_is_refused_in_a_child_process` (a child process with `SystemDrive` set to a user folder holding `ProgramData`, **failed before the fix**: the base was accepted), `normal_environment_resolves_to_the_kernel_system_drive`, `pin_rules`, `elevated_base_ignores_programdata_env`, `base_rules_reject_unc_relative_verbatim_and_non_fixed`, `base_rules_reject_a_junction`, and the round 3 junction, lock and permission tests. Also: stale `wpum-run-*` sweep and a 15-minute installer timeout (tests named in the round 4 notes). **Not proven:** a real elevated install, the elevated owner clause (`O:BA`): the OS refuses it for a non-elevated token (test `admin_only_owner_clause_is_enforced_by_the_os`), the elevated branch was not run, the permission denial with a true standard-user token (only a non-elevated admin token was used), the folder owner is not checked beyond that. |
+| 7b | Check-then-use gap for open and delete paths | Accepted | Needs same-user file system control, the web view cannot create junctions. Owner: Backend. |
+| 8 | Tests for `paths.rs` and `validate.rs` | Closed locally, CI Open | Pass on the author machine only. Owner: QA. |
+| 9 | UNC, verbatim, drive-relative, root-relative paths and ADS names | Closed | Only `X:\` absolute paths with no `:` in any later segment pass. Tests: `unc_and_verbatim_with_any_slash_are_rejected`, `must_be_absolute_disk_path_without_streams`. |
+
+
+Also open: the signature check, copy and installer run now run on a blocking thread (`spawn_blocking`), but that path was not run end to end. Same-user processes can still write to the non-elevated run folder (no privilege boundary there). **N22 (low, open, not implemented):** the installer inherits the parent environment including `TEMP`. Hardening: start it with a cleared environment and `TEMP`/`TMP` set to the run folder. Owner: Backend.
+
+### Proposal for gap 6: DLL beside the EXE (not implemented)
+
+Problem: `Everything64.dll` is written next to the EXE. In Program Files a standard user cannot write there. In a portable, user-writable folder, another process can plant a DLL.
+
+Proposed design:
+1. Write the embedded DLL to a per-user folder, `%LOCALAPPDATA%\WPUM\bin\<version>\`, with an ACL for the current user only.
+2. Pin the DLL SHA-256 in the build (as is done for the Everything installer). Check the hash of the embedded bytes before writing, and the file on disk before loading.
+3. Replace `SetDllDirectoryW(exe dir)` with `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS)` and `AddDllDirectory(that folder)`. Drop the EXE folder from the search.
+4. If the hash check fails, disable search and show an error. Do not fall back to a PATH search.
+
+Alternatives: talk to Everything over its window-message IPC with no DLL (largest change), or install the DLL under Program Files with the installer (does not help the portable EXE).
+Cost: about one day, plus a Windows test for delay-load with the new directory. Owner: Architect. Decision needed from the project owner.
+## Not reviewed
+
+The frontend code, the full `lib.rs`, the Everything search engine code, the NSIS installer hooks, and the build scripts. This ADR needs another pass after that review.
+
+## Review trigger
+
+Revisit when a feature adds network access, a new elevated action, or a new delete or open path.
